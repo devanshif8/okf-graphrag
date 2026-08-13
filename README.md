@@ -9,9 +9,24 @@ OKF represents knowledge as markdown files with YAML frontmatter, cross-linked i
 ## Status
 
 - ✅ **Parser** — extracts frontmatter, body, and links (including anchored links like `file.md#section`) from OKF concept and index files. Handles `index.md` files with no frontmatter as link-only nodes. Tested against the full `knowledge-catalog` repo (129 files) and the `ga4` sample bundle (14/14 parsed cleanly).
-- ⬜ Neo4j loader — load parsed concepts as graph nodes, links as edges
+- ✅ **Neo4j loader** — loads parsed concepts as `:Concept` nodes and markdown links as `:LINKS_TO` edges. Idempotent (`MERGE`, not `CREATE`), so re-running updates in place. Verified against the `ga4` sample bundle: 14 nodes, 21 relationships.
 - ⬜ Qdrant loader — embed concept bodies for semantic search
 - ⬜ Retrieval layer — RRF fusion of vector + graph results via LangGraph
+
+## Setup
+
+```bash
+pip install pyyaml neo4j python-dotenv
+```
+
+The Neo4j loader reads its connection details from environment variables, loaded
+from a `.env` file in the project root (git-ignored):
+
+```
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=your-password
+```
 
 ## Usage
 
@@ -25,11 +40,49 @@ Parse an entire bundle:
 python parser.py --bundle path/to/bundle_dir
 ```
 
+Load a bundle into Neo4j:
+```bash
+python neo4j_loader.py path/to/bundle_dir
+```
+
+It prints how many nodes and relationships were merged, e.g.
+`14 nodes merged, 21 relationships merged`. Paths are relative to the current
+working directory — from the project root, the sample bundle is
+`knowledge-catalog/okf/bundles/ga4`.
+
+Re-running is safe: nodes are keyed on a bundle-relative id (`ga4/index.md`), so
+a second load updates the same nodes rather than duplicating them — from any
+working directory, relative path or absolute.
+
+Inspect the result in Neo4j:
+```cypher
+MATCH (a:Concept)-[:LINKS_TO]->(b:Concept) RETURN a.path, b.path
+```
+
 ## Design notes
 
 - `index.md` files without frontmatter are treated as link-only structural nodes (`is_index: true`) rather than skipped, since they carry real graph edges.
 - Link extraction matches `.md` targets, including an optional trailing anchor (`file.md#section`) — the anchor is preserved in the returned target, not stripped.
 - External links (non-`.md`) are intentionally excluded from the concept graph.
+- Each `:Concept` node is keyed on a **bundle-relative id** — the path relative to
+  the bundle root, prefixed with the bundle directory name and normalized to
+  forward slashes (`ga4/references/metrics/purchasers.md`). This id is
+  independent of the working directory the loader ran from and of the host OS,
+  so re-runs update nodes in place instead of duplicating them, and the same
+  bundle keys identically on any machine. Downstream stores (Qdrant) should use
+  this id to reference graph nodes.
+- The on-disk location is kept as a separate `source_path` property. Nothing
+  keys on it, so it can safely differ between machines.
+- The loader stores every frontmatter field as an additional property. Values Neo4j can't store natively (nested
+  dicts, mixed-type lists) are JSON-serialized; a frontmatter key named `path`
+  is dropped so it can't overwrite the node id.
+- Link targets are written relative to the linking file, so the loader resolves
+  each one against its source directory and strips any `#anchor` before matching.
+  Edges are only created when the target file is part of the same batch —
+  dangling links are silently skipped rather than creating empty nodes.
+- Bundle names come from the bundle directory's own name, so two bundles loaded
+  into the same database stay distinct even though both contain `index.md`.
+  Loading two *different* directories that share a basename would collide.
 
 ## License
 

@@ -3,12 +3,19 @@
 import argparse
 import datetime
 import json
+import logging
 import os
 
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
+from neo4j.exceptions import AuthError, ConfigurationError, ServiceUnavailable
 
 load_dotenv()
+
+# The driver logs connection failures to stderr via logging's last-resort
+# handler, duplicating the messages main() raises. Silence it unless the caller
+# configures logging themselves.
+logging.getLogger("neo4j").addHandler(logging.NullHandler())
 
 NEO4J_URI = os.getenv("NEO4J_URI")
 NEO4J_USER = os.getenv("NEO4J_USER")
@@ -126,7 +133,21 @@ def main() -> None:
         )
 
     concepts = parse_bundle(args.bundle)
-    nodes, relationships = load_bundle_to_neo4j(concepts, args.bundle)
+    try:
+        nodes, relationships = load_bundle_to_neo4j(concepts, args.bundle)
+    except ServiceUnavailable:
+        raise SystemExit(
+            f"could not reach Neo4j at {NEO4J_URI} - is the database running?"
+        ) from None
+    except AuthError:
+        raise SystemExit(
+            f"Neo4j rejected the credentials for user '{NEO4J_USER}' - "
+            "check NEO4J_USER and NEO4J_PASSWORD"
+        ) from None
+    except ConfigurationError as exc:
+        raise SystemExit(
+            f"bad Neo4j configuration (NEO4J_URI={NEO4J_URI}): {exc}"
+        ) from None
     print(f"{nodes} nodes merged, {relationships} relationships merged")
 
 

@@ -6,6 +6,56 @@ A consumer tool for [OKF (Open Knowledge Format)](https://github.com/GoogleCloud
 
 OKF represents knowledge as markdown files with YAML frontmatter, cross-linked into a graph via normal markdown links. That graph structure is currently only realized visually, in the bundled viewer. `okf-graphrag` realizes it operationally: as a queryable graph combined with semantic search over concept bodies.
 
+## How it works
+
+Ingest runs once per bundle and writes to both stores; query fans out to both
+and fuses the two rankings.
+
+```mermaid
+flowchart TB
+    subgraph ingest ["Ingest — once per bundle"]
+        direction LR
+        BUNDLE["OKF bundle<br/><i>.md + YAML frontmatter</i>"]
+        PARSE["<b>parser.py</b><br/>frontmatter · body · links"]
+        NLOAD["<b>neo4j_loader.py</b><br/>resolve links → edges"]
+        QLOAD["<b>qdrant_loader.py</b><br/>embed: all-MiniLM-L6-v2"]
+        BUNDLE --> PARSE
+        PARSE --> NLOAD
+        PARSE --> QLOAD
+    end
+
+    NEO[("<b>Neo4j</b><br/>:Concept nodes<br/>:LINKS_TO edges")]
+    QDR[("<b>Qdrant</b><br/>okf_concepts<br/>384-d vectors")]
+
+    NLOAD --> NEO
+    QLOAD --> QDR
+
+    subgraph query ["Query — retrieval.py"]
+        direction TB
+        Q["query string"]
+        VS["<b>vector_search</b><br/>ranked by cosine similarity"]
+        GE["<b>graph_expand</b><br/>undirected :LINKS_TO walk<br/>hub + degree damped"]
+        RRF["<b>reciprocal_rank_fusion</b><br/>Σ weight / (60 + rank)"]
+        ANN["annotate<br/>title · description"]
+        OUT["ranked results"]
+        Q --> VS
+        VS -- "top 5 hits seed the walk" --> GE
+        VS -- "ranked list 1" --> RRF
+        GE -- "ranked list 2" --> RRF
+        RRF --> ANN --> OUT
+    end
+
+    QDR -.-> VS
+    NEO -.-> GE
+    NEO -.-> ANN
+```
+
+The join between the two stores is the **concept id** — `ga4/index.md`, the
+path relative to the bundle root. `neo4j_loader.concept_id` mints it, Neo4j
+keys its nodes on it, Qdrant carries it in each point's payload, and retrieval
+fuses the two rankings by matching on it. Everything else about the two stores
+is independent.
+
 ## Status
 
 - ✅ **Parser** — extracts frontmatter, body, and links (including anchored links like `file.md#section`) from OKF concept and index files. Handles `index.md` files with no frontmatter as link-only nodes. Tested against the full `knowledge-catalog` repo (129 files) and the `ga4` sample bundle (14/14 parsed cleanly).

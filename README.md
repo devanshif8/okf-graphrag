@@ -1,5 +1,8 @@
 # okf-graphrag
 
+[![tests](https://github.com/devanshif8/okf-graphrag/actions/workflows/tests.yml/badge.svg)](https://github.com/devanshif8/okf-graphrag/actions/workflows/tests.yml)
+[![license](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+
 A consumer tool for [OKF (Open Knowledge Format)](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf) that ingests OKF bundles into a hybrid retrieval system — vector search (Qdrant) + graph traversal (Neo4j) — so agents can query OKF knowledge instead of just loading files flat into context.
 
 ## Why
@@ -71,8 +74,11 @@ is independent.
 ## Setup
 
 ```bash
-pip install pyyaml neo4j python-dotenv qdrant-client sentence-transformers
+pip install -r requirements.txt
 ```
+
+That is `pyyaml`, `neo4j`, `python-dotenv`, `qdrant-client` and
+`sentence-transformers`. Python 3.10 or newer.
 
 The Neo4j loader reads its connection details from environment variables, loaded
 from a `.env` file in the project root (git-ignored):
@@ -247,6 +253,33 @@ hybrid_search("purchase events")            # fused, annotated with title/descri
   graph ties by the neighbour's own vector rank, so structure defers to
   semantics exactly where structure is silent.
 
+## Development
+
+Install the runtime dependencies plus the test runner:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+Run the test suite from the repo root:
+
+```bash
+pytest
+```
+
+`pyproject.toml` puts the repo root on `sys.path` and points pytest at
+`tests/`, so this works with no install step. The suite covers the pure logic
+in all four modules — parsing, id derivation, property and payload coercion,
+and rank fusion — and needs no Neo4j, no Qdrant and no model download, so it
+runs offline in a couple of seconds. Anything that talks to a service is
+verified by hand against the `ga4` sample bundle instead; see Status above.
+
+CI runs the same command on every push and pull request across Python
+3.10-3.13 (`.github/workflows/tests.yml`).
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to verify the service-backed
+code paths by hand, the code style to match, and how to open a pull request.
+
 ## License
 
-Apache 2.0
+Apache 2.0 — see [LICENSE](LICENSE).

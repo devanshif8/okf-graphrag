@@ -1,0 +1,7 @@
+# Runtime dependencies. Floors are the oldest releases the code is known to
+# work against; the versions this was developed and verified on are noted.
+pyyaml>=6.0          # verified on 6.0.3
+neo4j>=5.14          # verified on 6.2.0
+python-dotenv>=1.0   # verified on 1.2.2
+qdrant-client>=1.10  # collection_exists / query_points; verified on 1.19.0
+sentence-transformers>=3.0  # verified on 5.7.0

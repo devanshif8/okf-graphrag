@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+# The modules live at the repo root, not in a package, so put the root on
+# sys.path: `pytest` from the repo root then works with no install step.
+pythonpath = ["."]
+testpaths = ["tests"]

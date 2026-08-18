@@ -65,6 +65,40 @@ def concept_id(path: str, bundle_root: str) -> str:
     return f"{_bundle_name(bundle_root)}/{relative.replace(os.sep, '/')}"
 
 
+def bundle_prefix(bundle_root: str) -> str:
+    """The id prefix every concept in this bundle shares, e.g. 'ga4/'.
+
+    Concept ids are '<bundle>/<relative path>', so this is what identifies the
+    bundle's own nodes in a database that may hold several bundles.
+    """
+    return f"{_bundle_name(bundle_root)}/"
+
+
+def bundle_edges(concepts: list[dict], bundle_root: str) -> list[tuple[str, str]]:
+    """Every :LINKS_TO edge the bundle's links imply, as (source, target) ids.
+
+    Targets are resolved on disk against the linking file, so a link only
+    becomes an edge when it points at a file in the same batch: dangling links
+    and self-links are dropped rather than creating empty nodes. Deduplicated
+    and sorted, so the result is stable across runs.
+    """
+    # Filesystem path -> node id, so links can be resolved on disk then mapped.
+    known = {
+        os.path.normpath(os.path.abspath(c["path"])): concept_id(c["path"], bundle_root)
+        for c in concepts
+    }
+
+    edges = set()
+    for concept in concepts:
+        source = concept_id(concept["path"], bundle_root)
+        for link in concept.get("links") or []:
+            resolved = _resolve_target(concept["path"], link.get("target", ""))
+            target = known.get(os.path.normpath(os.path.abspath(resolved)))
+            if target is not None and target != source:
+                edges.add((source, target))
+    return sorted(edges)
+
+
 def load_bundle_to_neo4j(concepts: list[dict], bundle_root: str) -> tuple[int, int]:
     """MERGE every concept as a :Concept node and link them with :LINKS_TO edges.
 
@@ -76,12 +110,6 @@ def load_bundle_to_neo4j(concepts: list[dict], bundle_root: str) -> tuple[int, i
     driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
     nodes = 0
     relationships = 0
-
-    # Filesystem path -> node id, so links can be resolved on disk then mapped.
-    known = {
-        os.path.normpath(os.path.abspath(c["path"])): concept_id(c["path"], bundle_root)
-        for c in concepts
-    }
 
     try:
         with driver.session() as session:
@@ -95,28 +123,71 @@ def load_bundle_to_neo4j(concepts: list[dict], bundle_root: str) -> tuple[int, i
                 )
                 nodes += 1
 
-            for concept in concepts:
-                source = concept_id(concept["path"], bundle_root)
-                targets = set()
-                for link in concept.get("links") or []:
-                    resolved = _resolve_target(concept["path"], link.get("target", ""))
-                    target = known.get(os.path.normpath(os.path.abspath(resolved)))
-                    if target is not None and target != source:
-                        targets.add(target)
-
-                for target in sorted(targets):
-                    session.run(
-                        "MATCH (a:Concept {path: $source}) "
-                        "MATCH (b:Concept {path: $target}) "
-                        "MERGE (a)-[:LINKS_TO]->(b)",
-                        source=source,
-                        target=target,
-                    )
-                    relationships += 1
+            for source, target in bundle_edges(concepts, bundle_root):
+                session.run(
+                    "MATCH (a:Concept {path: $source}) "
+                    "MATCH (b:Concept {path: $target}) "
+                    "MERGE (a)-[:LINKS_TO]->(b)",
+                    source=source,
+                    target=target,
+                )
+                relationships += 1
     finally:
         driver.close()
 
     return nodes, relationships
+
+
+def prune_neo4j_bundle(concepts: list[dict], bundle_root: str) -> tuple[int, int]:
+    """Delete this bundle's nodes and edges that its files no longer imply.
+
+    The loaders only ever MERGE, so a concept deleted or renamed on disk leaves
+    its node behind, and a link removed from a file leaves its edge behind;
+    both then keep surfacing in retrieval. This reconciles the stored bundle
+    with the parsed one. Scoped by id prefix, so other bundles in the same
+    database are untouched.
+
+    Stale edges go first: an edge touching a stale node is stale by definition
+    (the surviving edge set only covers current concepts), so it is counted
+    here rather than disappearing silently with the node.
+
+    Returns (nodes_deleted, relationships_deleted).
+    """
+    if not concepts:
+        raise ValueError(
+            "refusing to prune from an empty parse - every node in the bundle "
+            "would be deleted; check the bundle path"
+        )
+
+    prefix = bundle_prefix(bundle_root)
+    keep_nodes = [concept_id(c["path"], bundle_root) for c in concepts]
+    keep_edges = [list(edge) for edge in bundle_edges(concepts, bundle_root)]
+
+    driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+    try:
+        with driver.session() as session:
+            edges = session.run(
+                "MATCH (a:Concept)-[r:LINKS_TO]->(b:Concept) "
+                "WHERE a.path STARTS WITH $prefix AND b.path STARTS WITH $prefix "
+                "AND NOT [a.path, b.path] IN $keep "
+                "DELETE r "
+                "RETURN count(r) AS deleted",
+                prefix=prefix,
+                keep=keep_edges,
+            ).single()["deleted"]
+
+            nodes = session.run(
+                "MATCH (c:Concept) "
+                "WHERE c.path STARTS WITH $prefix AND NOT c.path IN $keep "
+                "DETACH DELETE c "
+                "RETURN count(c) AS deleted",
+                prefix=prefix,
+                keep=keep_nodes,
+            ).single()["deleted"]
+    finally:
+        driver.close()
+
+    return nodes, edges
 
 
 def main() -> None:
@@ -125,6 +196,11 @@ def main() -> None:
 
     ap = argparse.ArgumentParser(description="Load an OKF bundle into Neo4j.")
     ap.add_argument("bundle", help="path to the bundle directory")
+    ap.add_argument(
+        "--prune",
+        action="store_true",
+        help="also delete this bundle's nodes and edges that are no longer on disk",
+    )
     args = ap.parse_args()
 
     if not all([NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD]):
@@ -149,6 +225,16 @@ def main() -> None:
             f"bad Neo4j configuration (NEO4J_URI={NEO4J_URI}): {exc}"
         ) from None
     print(f"{nodes} nodes merged, {relationships} relationships merged")
+
+    if args.prune:
+        try:
+            gone_nodes, gone_edges = prune_neo4j_bundle(concepts, args.bundle)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
+        print(
+            f"{gone_nodes} stale nodes deleted, "
+            f"{gone_edges} stale relationships deleted"
+        )
 
 
 if __name__ == "__main__":

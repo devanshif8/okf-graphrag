@@ -7,13 +7,28 @@ import datetime
 import json
 import os
 
+import pytest
+
 from neo4j_loader import (
     _bundle_name,
     _properties,
     _property_value,
     _resolve_target,
+    bundle_edges,
+    bundle_prefix,
     concept_id,
+    prune_neo4j_bundle,
 )
+
+
+def _concept(bundle, relative, links=()):
+    """A parsed-concept dict for a file at `relative` inside `bundle`."""
+    return {
+        "path": str(bundle / relative),
+        "frontmatter": {},
+        "body": "",
+        "links": [{"text": t, "target": t} for t in links],
+    }
 
 
 class TestConceptId:
@@ -172,3 +187,68 @@ class TestProperties:
         props = _properties({"meta": {"nested": {"deep": 1}}})
 
         assert json.loads(props["meta"]) == {"nested": {"deep": 1}}
+
+
+class TestBundlePrefix:
+    def test_is_the_bundle_name_with_a_trailing_slash(self, tmp_path):
+        assert bundle_prefix(str(tmp_path / "ga4")) == "ga4/"
+
+    def test_matches_the_ids_of_that_bundle(self, tmp_path):
+        bundle = tmp_path / "ga4"
+        node = concept_id(str(bundle / "metrics" / "a.md"), str(bundle))
+
+        assert node.startswith(bundle_prefix(str(bundle)))
+
+    def test_does_not_match_another_bundle(self, tmp_path):
+        other = concept_id(str(tmp_path / "gsc" / "a.md"), str(tmp_path / "gsc"))
+
+        assert not other.startswith(bundle_prefix(str(tmp_path / "ga4")))
+
+
+class TestBundleEdges:
+    def test_pairs_a_link_with_its_target(self, tmp_path):
+        bundle = tmp_path / "ga4"
+        concepts = [_concept(bundle, "a.md", links=["b.md"]), _concept(bundle, "b.md")]
+
+        assert bundle_edges(concepts, str(bundle)) == [("ga4/a.md", "ga4/b.md")]
+
+    def test_drops_a_link_to_a_file_outside_the_batch(self, tmp_path):
+        bundle = tmp_path / "ga4"
+        concepts = [_concept(bundle, "a.md", links=["missing.md"])]
+
+        assert bundle_edges(concepts, str(bundle)) == []
+
+    def test_drops_a_self_link(self, tmp_path):
+        bundle = tmp_path / "ga4"
+        concepts = [_concept(bundle, "a.md", links=["a.md"])]
+
+        assert bundle_edges(concepts, str(bundle)) == []
+
+    def test_deduplicates_repeated_links_to_the_same_target(self, tmp_path):
+        bundle = tmp_path / "ga4"
+        concepts = [
+            _concept(bundle, "a.md", links=["b.md", "b.md#section"]),
+            _concept(bundle, "b.md"),
+        ]
+
+        assert bundle_edges(concepts, str(bundle)) == [("ga4/a.md", "ga4/b.md")]
+
+    def test_is_directed_and_sorted(self, tmp_path):
+        bundle = tmp_path / "ga4"
+        concepts = [
+            _concept(bundle, "b.md", links=["a.md"]),
+            _concept(bundle, "a.md", links=["b.md"]),
+        ]
+
+        assert bundle_edges(concepts, str(bundle)) == [
+            ("ga4/a.md", "ga4/b.md"),
+            ("ga4/b.md", "ga4/a.md"),
+        ]
+
+
+class TestPruneGuard:
+    def test_refuses_to_prune_from_an_empty_parse(self, tmp_path):
+        # Without the guard a mistyped bundle path parses to nothing and the
+        # prune deletes the whole bundle. It must not reach the driver at all.
+        with pytest.raises(ValueError, match="empty parse"):
+            prune_neo4j_bundle([], str(tmp_path / "ga4"))

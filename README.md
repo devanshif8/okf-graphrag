@@ -62,8 +62,8 @@ is independent.
 ## Status
 
 - ✅ **Parser** — extracts frontmatter, body, and links (including anchored links like `file.md#section`) from OKF concept and index files. Handles `index.md` files with no frontmatter as link-only nodes. Tested against the full `knowledge-catalog` repo (129 files) and the `ga4` sample bundle (14/14 parsed cleanly).
-- ✅ **Neo4j loader** — loads parsed concepts as `:Concept` nodes and markdown links as `:LINKS_TO` edges. Idempotent (`MERGE`, not `CREATE`), so re-running updates in place. Verified against the `ga4` sample bundle: 14 nodes, 21 relationships.
-- ✅ **Qdrant loader** — embeds concept bodies with `all-MiniLM-L6-v2` and upserts them into the `okf_concepts` collection. Idempotent (point ids are derived deterministically from the concept id). Verified against the `ga4` sample bundle: 14 points, keyed identically to the 14 Neo4j nodes.
+- ✅ **Neo4j loader** — loads parsed concepts as `:Concept` nodes and markdown links as `:LINKS_TO` edges. Idempotent (`MERGE`, not `CREATE`), so re-running updates in place, with `--prune` to remove nodes and edges that are no longer on disk. Verified against the `ga4` sample bundle: 14 nodes, 21 relationships.
+- ✅ **Qdrant loader** — embeds concept bodies with `all-MiniLM-L6-v2` and upserts them into the `okf_concepts` collection. Idempotent (point ids are derived deterministically from the concept id), with `--prune` to remove points that are no longer on disk. Verified against the `ga4` sample bundle: 14 points, keyed identically to the 14 Neo4j nodes.
 - ✅ **Retrieval layer** — hybrid search that fuses Qdrant vector hits with a
   Neo4j `:LINKS_TO` walk using weighted Reciprocal Rank Fusion. Plain Python, no
   LangGraph: the flow is a single linear pass (search → expand → fuse → annotate)
@@ -81,13 +81,21 @@ That is `pyyaml`, `neo4j`, `python-dotenv`, `qdrant-client` and
 `sentence-transformers`. Python 3.10 or newer.
 
 The Neo4j loader reads its connection details from environment variables, loaded
-from a `.env` file in the project root (git-ignored):
+from a `.env` file in the project root (git-ignored). Copy the template and fill
+it in:
+
+```bash
+cp .env.example .env
+```
 
 ```
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=your-password
 ```
+
+Qdrant needs no credentials locally; set `QDRANT_URL` in the same file to point
+at a server other than `http://localhost:6333`.
 
 The Qdrant loader reads `QDRANT_URL`, defaulting to `http://localhost:6333` if
 it isn't set. It needs no credentials. On first run it downloads the
@@ -120,6 +128,30 @@ Re-running is safe: nodes are keyed on a bundle-relative id (`ga4/index.md`), so
 a second load updates the same nodes rather than duplicating them — from any
 working directory, relative path or absolute.
 
+### Pruning deleted concepts
+
+Loading only ever `MERGE`s, so it adds and updates but never removes. Delete or
+rename a concept file, or drop a link out of one, and the node or edge it wrote
+last time stays in the database — invisibly, and it keeps surfacing in search.
+Pass `--prune` to reconcile the stored bundle with the parsed one:
+
+```bash
+python neo4j_loader.py path/to/bundle_dir --prune
+python qdrant_loader.py path/to/bundle_dir --prune
+```
+
+Each prints what it removed on top of the usual load line, e.g.
+`1 stale nodes deleted, 2 stale relationships deleted`. Deletion is scoped by
+the bundle's id prefix (`ga4/`), so other bundles sharing the database or the
+collection are untouched. Stale edges are removed before stale nodes, so an edge
+that vanishes along with its node is still reported rather than disappearing
+silently.
+
+It is off by default because it is the one destructive operation here. As a
+guard against the obvious way to lose a bundle, a prune whose parse produced no
+concepts at all — a mistyped or empty bundle path — is refused rather than
+deleting everything the prefix matches.
+
 Inspect the result in Neo4j:
 ```cypher
 MATCH (a:Concept)-[:LINKS_TO]->(b:Concept) RETURN a.path, b.path
@@ -133,7 +165,8 @@ python qdrant_loader.py path/to/bundle_dir
 It prints how many concepts were embedded, e.g.
 `14 concepts embedded and upserted into 'okf_concepts'`. Re-running is safe for
 the same reason Neo4j is: each point id is derived from the concept id, so a
-second load overwrites the same points.
+second load overwrites the same points, and `--prune` drops the points whose
+concept file is gone.
 
 Each point's `path` payload field is the same bundle-relative id the Neo4j nodes
 are keyed on, so a vector hit joins straight onto the graph:
@@ -201,6 +234,9 @@ hybrid_search("purchase events")            # fused, annotated with title/descri
   each one against its source directory and strips any `#anchor` before matching.
   Edges are only created when the target file is part of the same batch —
   dangling links are silently skipped rather than creating empty nodes.
+- `bundle_edges` derives that edge set from the parsed concepts alone, so the
+  load and the prune agree on what the bundle currently implies by construction
+  rather than by two implementations happening to match.
 - Bundle names come from the bundle directory's own name, so two bundles loaded
   into the same database stay distinct even though both contain `index.md`.
   Loading two *different* directories that share a basename would collide.

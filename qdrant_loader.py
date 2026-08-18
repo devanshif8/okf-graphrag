@@ -7,10 +7,15 @@ import uuid
 
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import ResponseHandlingException
-from qdrant_client.models import Distance, PointStruct, VectorParams
+from qdrant_client.models import (
+    Distance,
+    PointIdsList,
+    PointStruct,
+    VectorParams,
+)
 from sentence_transformers import SentenceTransformer
 
-from neo4j_loader import concept_id
+from neo4j_loader import bundle_prefix, concept_id
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 COLLECTION = "okf_concepts"
@@ -104,12 +109,82 @@ def load_bundle_to_qdrant(concepts: list[dict], bundle_root: str) -> int:
     return len(points)
 
 
+def _stale_point_ids(points, prefix: str, keep: set) -> list:
+    """Of these points, the ids belonging to the bundle but not to `keep`.
+
+    A point belongs to the bundle when its payload `path` — the concept id —
+    starts with the bundle prefix; points from other bundles, and any without a
+    readable path, are left alone.
+    """
+    stale = []
+    for point in points:
+        path = (point.payload or {}).get("path")
+        if isinstance(path, str) and path.startswith(prefix) and path not in keep:
+            stale.append(point.id)
+    return stale
+
+
+def prune_qdrant_bundle(concepts: list[dict], bundle_root: str) -> int:
+    """Delete this bundle's points whose concept file is no longer on disk.
+
+    The loader only upserts, so a concept deleted or renamed on disk leaves its
+    vector behind and it keeps matching queries. Scoped by the id prefix in the
+    payload, so other bundles in the same collection are untouched.
+
+    Returns the number of points deleted.
+    """
+    if not concepts:
+        raise ValueError(
+            "refusing to prune from an empty parse - every point in the bundle "
+            "would be deleted; check the bundle path"
+        )
+
+    prefix = bundle_prefix(bundle_root)
+    keep = {concept_id(c["path"], bundle_root) for c in concepts}
+
+    client = QdrantClient(url=QDRANT_URL)
+    try:
+        if not client.collection_exists(COLLECTION):
+            return 0
+
+        # Scrolled rather than filtered server-side: a prefix match on a payload
+        # string needs a full-text index the collection doesn't declare, and the
+        # ids alone are small enough to page through.
+        stale, offset = [], None
+        while True:
+            points, offset = client.scroll(
+                collection_name=COLLECTION,
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            stale.extend(_stale_point_ids(points, prefix, keep))
+            if offset is None:
+                break
+
+        if stale:
+            client.delete(
+                collection_name=COLLECTION,
+                points_selector=PointIdsList(points=stale),
+            )
+    finally:
+        client.close()
+
+    return len(stale)
+
+
 def main() -> None:
     """Parse a bundle directory, embed it, and push it into Qdrant."""
     from parser import parse_bundle
 
     ap = argparse.ArgumentParser(description="Load an OKF bundle into Qdrant.")
     ap.add_argument("bundle", help="path to the bundle directory")
+    ap.add_argument(
+        "--prune",
+        action="store_true",
+        help="also delete this bundle's points that are no longer on disk",
+    )
     args = ap.parse_args()
 
     concepts = parse_bundle(args.bundle)
@@ -120,6 +195,13 @@ def main() -> None:
             f"could not reach Qdrant at {QDRANT_URL} - is it running?"
         ) from None
     print(f"{count} concepts embedded and upserted into '{COLLECTION}'")
+
+    if args.prune:
+        try:
+            deleted = prune_qdrant_bundle(concepts, args.bundle)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
+        print(f"{deleted} stale points deleted from '{COLLECTION}'")
 
 
 if __name__ == "__main__":

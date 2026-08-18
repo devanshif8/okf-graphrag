@@ -7,7 +7,24 @@ model, so nothing here downloads weights or talks to Qdrant.
 import datetime
 import uuid
 
-from qdrant_loader import ID_NAMESPACE, _payload_value, _point_id, embedding_text
+import pytest
+
+from qdrant_loader import (
+    ID_NAMESPACE,
+    _payload_value,
+    _point_id,
+    _stale_point_ids,
+    embedding_text,
+    prune_qdrant_bundle,
+)
+
+
+class _Point:
+    """The subset of a scrolled Qdrant record the prune reads."""
+
+    def __init__(self, id, payload):
+        self.id = id
+        self.payload = payload
 
 
 class TestPointId:
@@ -93,3 +110,41 @@ class TestEmbeddingText:
     def test_keeps_a_description_only_concept_non_empty(self):
         assert embedding_text({"frontmatter": {"description": "Only."},
                                "body": ""}) == "Only."
+
+
+class TestStalePointIds:
+    def test_returns_a_bundle_point_that_is_no_longer_on_disk(self):
+        points = [_Point("p1", {"path": "ga4/gone.md"})]
+
+        assert _stale_point_ids(points, "ga4/", {"ga4/kept.md"}) == ["p1"]
+
+    def test_keeps_a_point_still_on_disk(self):
+        points = [_Point("p1", {"path": "ga4/kept.md"})]
+
+        assert _stale_point_ids(points, "ga4/", {"ga4/kept.md"}) == []
+
+    def test_leaves_another_bundle_alone(self):
+        # The collection is shared, so pruning ga4 must not touch gsc even
+        # though no gsc id is in the keep set.
+        points = [_Point("p1", {"path": "gsc/anything.md"})]
+
+        assert _stale_point_ids(points, "ga4/", {"ga4/kept.md"}) == []
+
+    def test_skips_a_point_with_no_readable_path(self):
+        points = [_Point("p1", {}), _Point("p2", None), _Point("p3", {"path": 7})]
+
+        assert _stale_point_ids(points, "ga4/", set()) == []
+
+    def test_does_not_match_a_bundle_whose_name_merely_starts_the_same(self):
+        # 'ga4_test/x.md' starts with 'ga4' but not with the prefix 'ga4/'.
+        points = [_Point("p1", {"path": "ga4_test/x.md"})]
+
+        assert _stale_point_ids(points, "ga4/", set()) == []
+
+
+class TestPruneGuard:
+    def test_refuses_to_prune_from_an_empty_parse(self, tmp_path):
+        # A mistyped bundle path parses to nothing; without the guard that
+        # would delete every point in the bundle. It must not reach a client.
+        with pytest.raises(ValueError, match="empty parse"):
+            prune_qdrant_bundle([], str(tmp_path / "ga4"))

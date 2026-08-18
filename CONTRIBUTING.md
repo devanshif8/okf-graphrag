@@ -26,6 +26,13 @@ pip install -r requirements-dev.txt
 That installs the runtime dependencies plus `pytest`. A virtual environment is
 recommended but not required.
 
+The tests need no services, but running the loaders against a real database
+does. Copy the environment template and fill in your Neo4j credentials:
+
+```bash
+cp .env.example .env
+```
+
 ## Running the tests
 
 From the repo root:

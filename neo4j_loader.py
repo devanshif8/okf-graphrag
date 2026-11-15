@@ -99,11 +99,33 @@ def bundle_edges(concepts: list[dict], bundle_root: str) -> list[tuple[str, str]
     return sorted(edges)
 
 
+# Every node write MERGEs on :Concept(path) and every read matches on it, so
+# it is the one property that has to be indexed. Without it Neo4j falls back to
+# a full label scan per MERGE, making a load quadratic in the size of the
+# bundle. A uniqueness constraint creates the backing index *and* enforces the
+# invariant the whole design rests on: one node per concept id, which is what
+# lets Qdrant payloads join onto the graph.
+CONCEPT_PATH_CONSTRAINT = (
+    "CREATE CONSTRAINT concept_path IF NOT EXISTS "
+    "FOR (c:Concept) REQUIRE c.path IS UNIQUE"
+)
+
+
+def ensure_schema(session) -> None:
+    """Create the :Concept(path) uniqueness constraint if it is missing.
+
+    Idempotent (IF NOT EXISTS), so every load can call it unconditionally.
+    """
+    session.run(CONCEPT_PATH_CONSTRAINT)
+
+
 def load_bundle_to_neo4j(concepts: list[dict], bundle_root: str) -> tuple[int, int]:
     """MERGE every concept as a :Concept node and link them with :LINKS_TO edges.
 
     Nodes are keyed on a bundle-relative id (see concept_id); the on-disk
     location is kept alongside it as a non-identifying source_path property.
+    Ensures the :Concept(path) constraint first, so the MERGEs are index-backed
+    rather than label scans.
 
     Returns (nodes_written, relationships_written).
     """
@@ -113,6 +135,8 @@ def load_bundle_to_neo4j(concepts: list[dict], bundle_root: str) -> tuple[int, i
 
     try:
         with driver.session() as session:
+            ensure_schema(session)
+
             for concept in concepts:
                 props = _properties(concept.get("frontmatter"))
                 props["source_path"] = os.path.abspath(concept["path"])

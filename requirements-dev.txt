@@ -1,3 +1,14 @@
-# Development dependencies: everything the tool needs, plus the test runner.
+# Development dependencies: the runtime, plus the converter's optional format
+# libraries (their tests skip when absent, but CI should actually run them),
+# plus the test runner.
 -r requirements.txt
+
+# Converter formats (convert_to_okf.py). Imported lazily and deliberately kept
+# out of requirements.txt: the ingest and search paths never touch them, so the
+# container image does not carry them either.
+pypdf>=4.0                # .pdf; verified on 5.9.0
+python-docx>=1.0          # .docx; verified on 1.2.0
+beautifulsoup4>=4.12      # .html; verified on 4.15.0
+
 pytest>=8.0  # verified on 9.1.1
+httpx>=0.27  # required by fastapi.testclient.TestClient (tests/test_webui.py)

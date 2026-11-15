@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>okf-graphrag</title>
+<style>
+  :root {
+    --bg: #fbfbfa;
+    --panel: #ffffff;
+    --ink: #1c1b19;
+    --muted: #6b6862;
+    --faint: #9a968e;
+    --line: #e6e3dd;
+    --accent: #2f6f5e;
+    --vector: #2f6f5e;
+    --graph: #8a5a2b;
+    --shadow: 0 1px 2px rgba(28,27,25,.05), 0 8px 24px rgba(28,27,25,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181a;
+      --panel: #1e2124;
+      --ink: #e9e6e1;
+      --muted: #a09b93;
+      --faint: #726d66;
+      --line: #2c3034;
+      --accent: #6ec2a8;
+      --vector: #6ec2a8;
+      --graph: #d3a06a;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.25);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 48px 24px 96px; }
+
+  header { margin-bottom: 28px; }
+  h1 {
+    font-size: 20px; font-weight: 600; margin: 0 0 4px;
+    letter-spacing: -.01em;
+  }
+  h1 .dot { color: var(--accent); }
+  .tagline { color: var(--muted); font-size: 13.5px; margin: 0; }
+
+  .searchbar {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 4px 6px 4px 14px;
+    box-shadow: var(--shadow);
+    transition: border-color .15s ease;
+  }
+  .searchbar:focus-within { border-color: var(--accent); }
+  .searchbar svg { flex: none; color: var(--faint); }
+  #q {
+    flex: 1; border: 0; background: none; color: inherit;
+    font: inherit; padding: 12px 0; outline: none; min-width: 0;
+  }
+  button.go {
+    flex: none; border: 0; border-radius: 8px; cursor: pointer;
+    background: var(--accent); color: var(--bg);
+    font: 600 13.5px/1 inherit; padding: 11px 18px;
+  }
+
+  button.ask {
+    flex: none; border: 1px solid var(--accent); border-radius: 8px; cursor: pointer;
+    background: none; color: var(--accent);
+    font: 600 13.5px/1 inherit; padding: 10px 16px;
+  }
+  button.ask:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+
+  .toolrow {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; margin: 10px 2px 0; font-size: 12.5px; color: var(--muted);
+    min-height: 22px;
+  }
+  .toolrow button {
+    background: none; border: 0; padding: 0; cursor: pointer;
+    color: var(--muted); font: inherit; text-decoration: underline;
+    text-decoration-color: var(--line); text-underline-offset: 3px;
+  }
+  .toolrow button:hover { color: var(--ink); }
+  #timing { font-variant-numeric: tabular-nums; }
+
+  .knobs {
+    margin-top: 12px; padding: 18px 20px;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px 26px;
+  }
+  .knobs[hidden] { display: none; }
+  .knob label {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 12.5px; color: var(--muted); margin-bottom: 6px;
+  }
+  .knob label b { color: var(--ink); font-variant-numeric: tabular-nums; font-weight: 600; }
+  .knob input[type=range] { width: 100%; accent-color: var(--accent); }
+  .knob .hint { display: block; font-size: 11.5px; color: var(--faint); margin-top: 4px; }
+  .knob.check {
+    grid-column: 1 / -1; display: flex; align-items: center; gap: 8px;
+    padding-top: 14px; border-top: 1px solid var(--line);
+  }
+  .knob.check label { margin: 0; color: var(--ink); font-size: 13px; }
+  .knob.check input { accent-color: var(--accent); }
+
+  #status { margin: 30px 2px 0; color: var(--muted); font-size: 13.5px; }
+  #status:empty { display: none; }
+  #status.error {
+    color: var(--ink); background: var(--panel);
+    border: 1px solid var(--line); border-left: 3px solid #c05a4a;
+    padding: 14px 16px; border-radius: 10px;
+  }
+
+  #answer {
+    margin: 30px 0 0; padding: 18px 20px;
+    background: var(--panel); border: 1px solid var(--line);
+    border-left: 3px solid var(--accent); border-radius: 0 12px 12px 0;
+    box-shadow: var(--shadow);
+  }
+  #answer[hidden] { display: none; }
+  #answer.declined { border-left-color: var(--faint); }
+  #answer.error { border-left-color: #c05a4a; }
+  #answer .label {
+    font-size: 11px; color: var(--faint); text-transform: uppercase;
+    letter-spacing: .04em; margin-bottom: 8px;
+  }
+  #answer .body { font-size: 15px; line-height: 1.65; white-space: pre-wrap; }
+  #answer .cite {
+    font: 600 11.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--accent); vertical-align: 2px; padding: 0 1px;
+  }
+  #answer .warn { margin-top: 10px; font-size: 12.5px; color: #c05a4a; }
+  #answer .sources { margin: 14px 0 0; padding: 12px 0 0; border-top: 1px solid var(--line); }
+  #answer .sources div { font-size: 13px; margin-top: 4px; }
+  #answer .sources .n {
+    font: 600 11.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--accent); margin-right: 6px;
+  }
+  #answer .sources .path { display: inline; margin-left: 6px; }
+
+  ol { list-style: none; margin: 26px 0 0; padding: 0; }
+  li {
+    display: grid; grid-template-columns: 26px 1fr; gap: 14px;
+    padding: 18px 0; border-top: 1px solid var(--line);
+  }
+  li:first-child { border-top: 0; }
+  .rank {
+    font-variant-numeric: tabular-nums; font-size: 13px;
+    color: var(--faint); padding-top: 1px;
+  }
+  .title { font-weight: 600; letter-spacing: -.005em; }
+  .path {
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--faint); margin-top: 2px; word-break: break-all;
+  }
+  .desc { color: var(--muted); font-size: 13.5px; margin-top: 7px; }
+  .passage {
+    margin: 10px 0 0; padding: 10px 14px;
+    border-left: 3px solid var(--line); background: var(--panel);
+    border-radius: 0 8px 8px 0;
+    font-size: 13.5px; line-height: 1.6; color: var(--ink);
+  }
+  .passage.matched { border-left-color: var(--vector); }
+  .passage.closest { border-left-color: var(--graph); }
+  .passage .how {
+    display: block; font-size: 11px; color: var(--faint);
+    text-transform: uppercase; letter-spacing: .04em; margin-bottom: 4px;
+  }
+  .passage .text.clamped {
+    display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
+    overflow: hidden; cursor: pointer;
+  }
+  .meta {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    margin-top: 9px; font-size: 11.5px;
+  }
+  .chip {
+    border: 1px solid var(--line); border-radius: 999px;
+    padding: 2px 9px; color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .chip.vector { color: var(--vector); border-color: color-mix(in srgb, var(--vector) 35%, transparent); }
+  .chip.graph  { color: var(--graph);  border-color: color-mix(in srgb, var(--graph) 35%, transparent); }
+  .chip.score  { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  .bar { height: 3px; border-radius: 2px; background: var(--line); margin-top: 10px; overflow: hidden; }
+  .bar span { display: block; height: 100%; background: var(--accent); }
+
+  footer { margin-top: 56px; font-size: 12px; color: var(--faint); }
+  footer code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>okf-graphrag<span class="dot">.</span></h1>
+    <p class="tagline">Hybrid search over a loaded OKF bundle &mdash; Qdrant vectors fused with a Neo4j link walk. <b>Ask</b> writes a cited answer from what it finds.</p>
+  </header>
+
+  <form id="form">
+    <div class="searchbar">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6">
+        <circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14" stroke-linecap="round"/>
+      </svg>
+      <input id="q" placeholder="how many users made a purchase" autocomplete="off" autofocus>
+      <button class="go" type="submit">Search</button>
+      <button class="ask" type="button" id="ask" title="search, then write an answer from the passages found">Ask</button>
+    </div>
+
+    <div class="toolrow">
+      <button type="button" id="toggle">tuning</button>
+      <span id="timing"></span>
+    </div>
+
+    <div class="knobs" id="knobs" hidden>
+      <div class="knob">
+        <label for="top_k">results <b id="top_k_v">10</b></label>
+        <input type="range" id="top_k" min="1" max="30" step="1" value="10">
+      </div>
+      <div class="knob">
+        <label for="vector_weight">vector weight <b id="vector_weight_v">1.0</b></label>
+        <input type="range" id="vector_weight" min="0" max="2" step="0.1" value="1">
+        <span class="hint">how loudly semantic similarity votes</span>
+      </div>
+      <div class="knob">
+        <label for="graph_weight">graph weight <b id="graph_weight_v">0.5</b></label>
+        <input type="range" id="graph_weight" min="0" max="2" step="0.1" value="0.5">
+        <span class="hint">how loudly link structure votes</span>
+      </div>
+      <div class="knob">
+        <label for="degree_damping">degree damping <b id="degree_damping_v">0.5</b></label>
+        <input type="range" id="degree_damping" min="0" max="1" step="0.1" value="0.5">
+        <span class="hint">penalty on well-connected hubs; 0 disables</span>
+      </div>
+      <div class="knob check">
+        <input type="checkbox" id="include_index">
+        <label for="include_index">keep index.md hubs</label>
+      </div>
+    </div>
+  </form>
+
+  <section id="answer" hidden></section>
+  <p id="status"></p>
+  <ol id="results"></ol>
+
+  <footer>
+    Load a bundle first: <code>python neo4j_loader.py &lt;bundle&gt;</code> and <code>python qdrant_loader.py &lt;bundle&gt;</code>.
+  </footer>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const status = $("status"), list = $("results"), timing = $("timing");
+const sliders = ["top_k", "vector_weight", "graph_weight", "degree_damping"];
+
+$("toggle").onclick = () => { $("knobs").hidden = !$("knobs").hidden; };
+
+// Mirror each slider's value into its label, and re-run the last query on
+// release so the effect of a knob is visible without a second click.
+for (const id of sliders) {
+  const input = $(id);
+  const show = () => {
+    $(id + "_v").textContent = id === "top_k" ? input.value : Number(input.value).toFixed(1);
+  };
+  input.oninput = show;
+  input.onchange = () => { show(); if ($("q").value.trim()) search(); };
+  show();
+}
+$("include_index").onchange = () => { if ($("q").value.trim()) search(); };
+
+$("form").onsubmit = (e) => { e.preventDefault(); $("answer").hidden = true; search(); };
+$("ask").onclick = () => { if ($("q").value.trim()) { ask(); search(); } };
+
+// Every response carries the token of the request that asked for it, so a slow
+// earlier search can't overwrite the results of a later one.
+let inFlight = 0, asking = 0;
+const apiToken = new URLSearchParams(location.search).get("token") || "";
+
+
+async function search() {
+  const query = $("q").value.trim();
+  if (!query) return;
+
+  const token = ++inFlight;
+  const params = new URLSearchParams({
+    q: query,
+    include_index: $("include_index").checked ? "1" : "0",
+  });
+  for (const id of sliders) params.set(id, $(id).value);
+  // When the server requires a token it hands it to the page as ?token=... on
+  // the URL, because a browser cannot set a header on a top-level navigation.
+  // A fetch does not inherit that query string, so forward it explicitly.
+  if (apiToken) params.set("token", apiToken);
+
+  status.className = "";
+  status.textContent = "searching…";
+  timing.textContent = "";
+  const started = performance.now();
+
+  let payload;
+  try {
+    payload = await (await fetch("/api/search?" + params)).json();
+  } catch (err) {
+    payload = { error: "the page could not reach its own server — did webui.py stop?" };
+  }
+  if (token !== inFlight) return;
+
+  if (payload.error) {
+    list.innerHTML = "";
+    status.className = "error";
+    status.textContent = payload.error;
+    return;
+  }
+
+  render(payload.results || []);
+  timing.textContent = Math.round(performance.now() - started) + " ms";
+}
+
+// The answer is written from its own retrieval (the default ranking, top 6),
+// not from the results below, so the tuning sliders can't change it - which
+// is why it lists its own sources rather than pointing into the list.
+async function ask() {
+  const question = $("q").value.trim();
+  const token = ++asking;
+  const box = $("answer");
+  box.hidden = false;
+  box.className = "";
+  box.replaceChildren(el("div", "label", "answer"), el("div", "body", "writing an answer…"));
+
+  const params = new URLSearchParams({ q: question });
+  if (apiToken) params.set("token", apiToken);
+  let payload;
+  try {
+    payload = await (await fetch("/api/answer?" + params)).json();
+  } catch (err) {
+    payload = { error: "the page could not reach its own server — did webui.py stop?" };
+  }
+  if (token !== asking) return;
+
+  if (payload.error) {
+    box.className = "error";
+    box.replaceChildren(el("div", "label", "no answer"), el("div", "body", payload.error));
+    return;
+  }
+  if (!payload.answered) {
+    box.className = "declined";
+    box.replaceChildren(
+      el("div", "label", "no answer"),
+      el("div", "body", payload.sources.length
+        ? "The library doesn't answer that. The closest passages were on related topics, but none of them said it."
+        : "Nothing was retrieved to answer from. Is a bundle loaded?"),
+    );
+    return;
+  }
+
+  // Split on [n] so citations can be styled without ever parsing the model's
+  // text as HTML: every piece goes in as a text node.
+  const body = el("div", "body");
+  for (const part of payload.answer.split(/(\[\d+\])/)) {
+    body.append(/^\[\d+\]$/.test(part) ? el("span", "cite", part) : document.createTextNode(part));
+  }
+  const parts = [el("div", "label", "answer"), body];
+  if (payload.uncited) {
+    parts.push(el("div", "warn", "This answer cites no passage — treat it with suspicion."));
+  }
+  if (payload.cited.length) {
+    const sources = el("div", "sources");
+    for (const c of payload.cited) {
+      const row = el("div");
+      row.append(el("span", "n", "[" + c.n + "]"), document.createTextNode(c.title), el("span", "path", c.id));
+      sources.append(row);
+    }
+    parts.push(sources);
+  }
+  box.replaceChildren(...parts);
+}
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function render(results) {
+  list.innerHTML = "";
+  if (!results.length) {
+    status.className = "";
+    status.textContent = "No results. Is a bundle loaded into both stores?";
+    return;
+  }
+  status.textContent = "";
+  const best = results[0].score || 1;
+
+  results.forEach((r, i) => {
+    const li = document.createElement("li");
+
+    const rank = document.createElement("div");
+    rank.className = "rank";
+    rank.textContent = i + 1;
+
+    const body = document.createElement("div");
+
+    const title = document.createElement("div");
+    title.className = "title";
+    title.textContent = r.title || r.id;
+    body.append(title);
+
+    if (r.title) {
+      const path = document.createElement("div");
+      path.className = "path";
+      path.textContent = r.id;
+      body.append(path);
+    }
+    if (r.description) {
+      const desc = document.createElement("div");
+      desc.className = "desc";
+      desc.textContent = r.description;
+      body.append(desc);
+    }
+    // The passage says *why* this result is here. A vector hit shows the chunk
+    // that matched; a graph-only hit shows the chunk nearest the query, and is
+    // labelled so, since the link walk reached the chapter, not that passage.
+    if (r.passage) {
+      const box = document.createElement("div");
+      box.className = "passage " + r.passage.how;
+      const how = document.createElement("span");
+      how.className = "how";
+      how.textContent = r.passage.how === "matched"
+        ? "matched passage"
+        : "closest passage — found via graph links";
+      const text = document.createElement("div");
+      text.className = "text clamped";
+      text.textContent = r.passage.text;
+      text.title = "click to expand";
+      text.onclick = () => text.classList.toggle("clamped");
+      box.append(how, text);
+      body.append(box);
+    }
+
+    // The chips are the point of the UI: they show which of the two retrievers
+    // put this result here, and at what rank in each.
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const score = document.createElement("span");
+    score.className = "chip score";
+    score.textContent = "rrf " + r.score.toFixed(4);
+    meta.append(score);
+    for (const name of ["vector", "graph"]) {
+      if (r.ranks && r.ranks[name]) {
+        const chip = document.createElement("span");
+        chip.className = "chip " + name;
+        chip.textContent = name + " #" + r.ranks[name];
+        meta.append(chip);
+      }
+    }
+    body.append(meta);
+
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    const fill = document.createElement("span");
+    fill.style.width = Math.max(3, (r.score / best) * 100) + "%";
+    bar.append(fill);
+    body.append(bar);
+
+    li.append(rank, body);
+    list.append(li);
+  });
+}
+</script>
+</body>
+</html>

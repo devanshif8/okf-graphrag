@@ -2,6 +2,9 @@
 graph traversal via Reciprocal Rank Fusion."""
 
 import argparse
+import atexit
+import os
+import threading
 
 from neo4j import GraphDatabase
 from neo4j.exceptions import AuthError, ConfigurationError, ServiceUnavailable
@@ -10,7 +13,8 @@ from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedR
 from sentence_transformers import SentenceTransformer
 
 from neo4j_loader import NEO4J_PASSWORD, NEO4J_URI, NEO4J_USER
-from qdrant_loader import COLLECTION, MODEL_NAME, QDRANT_URL
+import qdrant_loader
+from qdrant_loader import COLLECTION, QDRANT_URL
 
 # RRF's rank-smoothing constant. 60 is the value from the original paper
 # (Cormack et al. 2009) and the usual default; raising it flattens the
@@ -42,6 +46,14 @@ INDEX_SUFFIX = "/index.md"
 # outright would. 0 disables damping.
 DEGREE_DAMPING = 0.5
 
+# Qdrant stores one point per *chunk*, but everything downstream — the graph
+# join, the fusion, the results — is per *concept*. So a search has to retrieve
+# more points than it needs concepts, because several of them can belong to the
+# same document. This multiplier is that headroom: with it, a query whose top
+# hits are four chunks of one long document still comes back with other
+# documents behind it instead of a single document repeated.
+CHUNK_OVERSAMPLE = 4
+
 # Vector candidates to retrieve regardless of how many results are asked for.
 # Fusion needs a deeper pool than it returns: with top_k alone, asking for 2
 # results would also shrink the candidate pool to 2, so a concept could vanish
@@ -49,44 +61,163 @@ DEGREE_DAMPING = 0.5
 MIN_CANDIDATES = 10
 
 
+def _seconds(name: str, default: float) -> float:
+    """Read a timeout from the environment, falling back on anything unusable."""
+    try:
+        value = float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+# Timeouts. Without them a store that accepts a connection and then stops
+# answering blocks the calling thread forever — and since the clients below are
+# now long-lived and shared, that is a worker lost for the life of the process
+# rather than for one request. Every one of these is a *bound*, not a target:
+# the p90 query is ~0.3s, so these only fire when something is actually wrong.
+#
+# Neo4j splits its budget three ways: reaching the server, waiting for a free
+# pooled connection, and retrying a transaction that failed transiently.
+NEO4J_CONNECTION_TIMEOUT = _seconds("NEO4J_CONNECTION_TIMEOUT", 5.0)
+NEO4J_ACQUISITION_TIMEOUT = _seconds("NEO4J_ACQUISITION_TIMEOUT", 10.0)
+NEO4J_RETRY_TIME = _seconds("NEO4J_RETRY_TIME", 15.0)
+
+# Qdrant takes a single per-request timeout covering connect and read.
+QDRANT_TIMEOUT = _seconds("QDRANT_TIMEOUT", 10.0)
+
+
+# Every client here is expensive to build and cheap to keep: the Neo4j driver
+# is a connection *pool* meant to outlive individual queries, constructing a
+# QdrantClient costs ~700ms (it probes the server and builds its HTTP stack),
+# and loading all-MiniLM-L6-v2 takes seconds. Building any of them per query —
+# as this module used to — put ~1s of pure setup in front of ~30ms of work.
+#
+# All three are safe to share: the driver and the Qdrant client are documented
+# as thread-safe once constructed, and the model's weights are immutable after
+# load. Only the construction races, so that is what the lock guards. Built
+# lazily so importing this module stays cheap for callers that never search.
+_DRIVER = None
+_QDRANT: QdrantClient | None = None
+_LOCK = threading.Lock()
+
+
+def _model() -> SentenceTransformer:
+    """Return the shared query embedding model, loading it on first use.
+
+    Delegates to qdrant_loader, which owns MODEL_NAME: the query has to be
+    embedded by the same model as the stored vectors or the two are not
+    comparable, and sharing the instance makes that structural rather than a
+    convention two modules have to keep agreeing on.
+    """
+    return qdrant_loader.model()
+
+
 def _driver():
-    """Open a Neo4j driver from the same .env config the loader uses."""
-    return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+    """Return the shared Neo4j driver, opening it on first use.
+
+    Configured from the same .env the loader reads. The driver connects lazily,
+    so building it does no I/O; what it buys is a reused connection pool.
+    """
+    global _DRIVER
+    with _LOCK:
+        if _DRIVER is None:
+            _DRIVER = GraphDatabase.driver(
+                NEO4J_URI,
+                auth=(NEO4J_USER, NEO4J_PASSWORD),
+                connection_timeout=NEO4J_CONNECTION_TIMEOUT,
+                connection_acquisition_timeout=NEO4J_ACQUISITION_TIMEOUT,
+                max_transaction_retry_time=NEO4J_RETRY_TIME,
+            )
+        return _DRIVER
+
+
+def _qdrant() -> QdrantClient:
+    """Return the shared Qdrant client, connecting on first use."""
+    global _QDRANT
+    with _LOCK:
+        if _QDRANT is None:
+            _QDRANT = QdrantClient(url=QDRANT_URL, timeout=QDRANT_TIMEOUT)
+        return _QDRANT
+
+
+def close_clients() -> None:
+    """Close the shared stores and drop them, so the next call rebuilds.
+
+    A long-lived server calls this on shutdown and a CLI run on exit; tests use
+    it to reset between cases. Safe to call when nothing was ever opened.
+    """
+    global _DRIVER, _QDRANT
+    with _LOCK:
+        for client in (_DRIVER, _QDRANT):
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:  # noqa: BLE001 - shutdown must not raise
+                    pass
+        _DRIVER = _QDRANT = None
+
+
+atexit.register(close_clients)
+
+
+def fold_chunks(hits: list[dict], top_k: int) -> list[dict]:
+    """Collapse chunk hits into one entry per concept, best chunk winning.
+
+    A concept scores as its single best-matching chunk rather than, say, the
+    mean of its chunks. Max is the right summary because chunking exists to let
+    one passage of a long document answer a narrow question: averaging would
+    punish exactly that document for the many chunks that are about something
+    else, which is the behaviour chunking was introduced to remove.
+
+    `chunk_index` records which chunk matched, so a caller can show the passage
+    that was actually responsible for the hit.
+    """
+    best: dict[str, dict] = {}
+    for hit in hits:
+        identifier = hit["id"]
+        if identifier not in best or hit["score"] > best[identifier]["score"]:
+            best[identifier] = hit
+
+    ranked = sorted(best.values(), key=lambda h: (-h["score"], h["id"]))
+    return ranked[:top_k]
 
 
 def vector_search(query: str, top_k: int = 10) -> list[dict]:
     """Rank concepts by embedding similarity to the query, best first.
 
     Embeds the query with the same model qdrant_loader used to embed the
-    bundle, and searches the collection it wrote. Returns dicts of
-    {"id": concept_id, "score": similarity_score}.
+    bundle, and searches the collection it wrote. The collection holds one
+    point per chunk, so the raw hits are folded back to one entry per concept
+    before returning — see `fold_chunks`. Returns dicts of
+    {"id": concept_id, "score": similarity_score, "chunk_index": int}.
     """
-    model = SentenceTransformer(MODEL_NAME)
-    client = QdrantClient(url=QDRANT_URL)
+    client = _qdrant()
 
-    try:
-        if not client.collection_exists(COLLECTION):
-            raise LookupError(
-                f"collection '{COLLECTION}' does not exist at {QDRANT_URL} - "
-                "load a bundle with qdrant_loader.py first"
-            )
-        vector = model.encode(query).tolist()
-        hits = client.query_points(
-            collection_name=COLLECTION,
-            query=vector,
-            limit=top_k,
-            with_payload=True,
-        ).points
-    finally:
-        client.close()
+    if not client.collection_exists(COLLECTION):
+        raise LookupError(
+            f"collection '{COLLECTION}' does not exist at {QDRANT_URL} - "
+            "load a bundle with qdrant_loader.py first"
+        )
+    vector = _model().encode(query).tolist()
+    hits = client.query_points(
+        collection_name=COLLECTION,
+        query=vector,
+        limit=top_k * CHUNK_OVERSAMPLE,
+        with_payload=True,
+    ).points
 
     # The payload 'path' is the bundle-relative id qdrant_loader keyed the point
     # on (via neo4j_loader.concept_id), so it doubles as the graph node id.
-    return [
-        {"id": hit.payload["path"], "score": hit.score}
+    chunks = [
+        {
+            "id": hit.payload["path"],
+            "score": hit.score,
+            "chunk_index": (hit.payload or {}).get("chunk_index", 0),
+        }
         for hit in hits
         if (hit.payload or {}).get("path")
     ]
+    return fold_chunks(chunks, top_k)
 
 
 def graph_expand(
@@ -146,18 +277,14 @@ def graph_expand(
     ORDER BY score DESC, distance ASC, best_seed ASC, id ASC
     """
 
-    driver = _driver()
-    try:
-        with driver.session() as session:
-            result = session.run(
-                query,
-                seeds=list(concept_ids),
-                index_suffix=INDEX_SUFFIX,
-                damping=float(degree_damping),
-            )
-            return [dict(record) for record in result]
-    finally:
-        driver.close()
+    with _driver().session() as session:
+        result = session.run(
+            query,
+            seeds=list(concept_ids),
+            index_suffix=INDEX_SUFFIX,
+            damping=float(degree_damping),
+        )
+        return [dict(record) for record in result]
 
 
 def reciprocal_rank_fusion(
@@ -197,18 +324,14 @@ def _annotate(results: list[dict]) -> list[dict]:
     if not results:
         return results
 
-    driver = _driver()
-    try:
-        with driver.session() as session:
-            records = session.run(
-                "MATCH (c:Concept) WHERE c.path IN $ids "
-                "RETURN c.path AS id, c.title AS title, "
-                "c.description AS description, c.source_path AS source_path",
-                ids=[r["id"] for r in results],
-            )
-            properties = {r["id"]: dict(r) for r in records}
-    finally:
-        driver.close()
+    with _driver().session() as session:
+        records = session.run(
+            "MATCH (c:Concept) WHERE c.path IN $ids "
+            "RETURN c.path AS id, c.title AS title, "
+            "c.description AS description, c.source_path AS source_path",
+            ids=[r["id"] for r in results],
+        )
+        properties = {r["id"]: dict(r) for r in records}
 
     for result in results:
         node = properties.get(result["id"]) or {}
@@ -236,7 +359,8 @@ def hybrid_search(
     graph list by default, and that list is weighted below the vector list, so
     hub structure can't outvote a strong vector hit; pass equal weights and
     exclude_index=False for plain RRF over the raw neighbourhood. Returns up to
-    `top_k` results, best first, each annotated with title and description.
+    `top_k` results, best first, each annotated with title and description,
+    and with the `chunk_index` that matched when the vector list found it.
     """
     hits = vector_search(query, top_k=max(top_k, MIN_CANDIDATES))
     if not hits:
@@ -253,8 +377,16 @@ def hybrid_search(
     fused = reciprocal_rank_fusion(
         {"vector": vector_ids, "graph": graph_ids},
         weights={"vector": vector_weight, "graph": graph_weight},
-    )
-    return _annotate(fused[:top_k])
+    )[:top_k]
+
+    # Keep the chunk that put each vector hit in the list, so a caller can show
+    # the passage responsible. Graph-only results have no such chunk: the walk
+    # reached the whole concept, not a passage of it.
+    matched = {hit["id"]: hit["chunk_index"] for hit in hits}
+    for result in fused:
+        if result["id"] in matched:
+            result["chunk_index"] = matched[result["id"]]
+    return _annotate(fused)
 
 
 def main() -> None:

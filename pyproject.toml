@@ -3,3 +3,6 @@
 # sys.path: `pytest` from the repo root then works with no install step.
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+    "integration: exercises real Neo4j, Qdrant and embeddings; skipped when the stores are unreachable",
+]

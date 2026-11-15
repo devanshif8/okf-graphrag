@@ -7,6 +7,7 @@ exercised on the paths that return or raise before a driver is opened.
 import pytest
 
 from retrieval import (
+    CHUNK_OVERSAMPLE,
     DEGREE_DAMPING,
     GRAPH_SEEDS,
     GRAPH_WEIGHT,
@@ -14,6 +15,7 @@ from retrieval import (
     MIN_CANDIDATES,
     RRF_K,
     VECTOR_WEIGHT,
+    fold_chunks,
     graph_expand,
     reciprocal_rank_fusion,
 )
@@ -121,7 +123,68 @@ class TestGraphExpandGuards:
             graph_expand([], hops=0)
 
 
+class TestFoldChunks:
+    def test_collapses_several_chunks_of_one_concept_into_one_result(self):
+        hits = [
+            {"id": "b/a.md", "score": 0.9, "chunk_index": 3},
+            {"id": "b/a.md", "score": 0.7, "chunk_index": 0},
+        ]
+
+        assert fold_chunks(hits, 10) == [
+            {"id": "b/a.md", "score": 0.9, "chunk_index": 3}
+        ]
+
+    def test_a_concept_scores_as_its_best_chunk_not_its_average(self):
+        """One sharply relevant passage in a long document must outrank a
+        document that is vaguely on topic throughout - that is what chunking
+        was introduced to make possible."""
+        hits = [
+            {"id": "b/vague.md", "score": 0.60, "chunk_index": 0},
+            {"id": "b/sharp.md", "score": 0.95, "chunk_index": 7},
+            {"id": "b/sharp.md", "score": 0.10, "chunk_index": 0},
+            {"id": "b/sharp.md", "score": 0.05, "chunk_index": 1},
+        ]
+
+        assert [hit["id"] for hit in fold_chunks(hits, 10)] == [
+            "b/sharp.md",
+            "b/vague.md",
+        ]
+
+    def test_keeps_the_index_of_the_chunk_that_matched(self):
+        hits = [
+            {"id": "b/a.md", "score": 0.2, "chunk_index": 0},
+            {"id": "b/a.md", "score": 0.8, "chunk_index": 5},
+        ]
+
+        assert fold_chunks(hits, 10)[0]["chunk_index"] == 5
+
+    def test_applies_top_k_after_folding_not_before(self):
+        """Truncating before the fold would let one long document's chunks
+        consume the whole result set."""
+        hits = [
+            {"id": "b/long.md", "score": 0.9, "chunk_index": 0},
+            {"id": "b/long.md", "score": 0.8, "chunk_index": 1},
+            {"id": "b/other.md", "score": 0.7, "chunk_index": 0},
+        ]
+
+        assert len(fold_chunks(hits, 2)) == 2
+
+    def test_ties_break_on_the_id_so_the_order_is_stable(self):
+        hits = [
+            {"id": "b/z.md", "score": 0.5, "chunk_index": 0},
+            {"id": "b/a.md", "score": 0.5, "chunk_index": 0},
+        ]
+
+        assert [hit["id"] for hit in fold_chunks(hits, 10)] == ["b/a.md", "b/z.md"]
+
+    def test_no_hits_folds_to_nothing(self):
+        assert fold_chunks([], 10) == []
+
+
 class TestTuningDefaults:
+    def test_the_chunk_oversample_leaves_room_for_repeated_concepts(self):
+        assert CHUNK_OVERSAMPLE >= 2
+
     def test_the_graph_list_is_weighted_below_the_vector_list(self):
         assert 0 < GRAPH_WEIGHT < VECTOR_WEIGHT
 
@@ -135,3 +198,33 @@ class TestTuningDefaults:
         assert INDEX_SUFFIX == "/index.md"
         assert "ga4/references/index.md".endswith(INDEX_SUFFIX)
         assert not "ga4/reindex.md".endswith(INDEX_SUFFIX)
+
+
+class TestHybridSearchPassages:
+    @pytest.fixture
+    def stubbed(self, monkeypatch):
+        """Stub both stores: a and b come from the vector list, c only from the walk."""
+        import retrieval
+
+        monkeypatch.setattr(
+            retrieval,
+            "vector_search",
+            lambda query, top_k: [
+                {"id": "a", "score": 0.9, "chunk_index": 3},
+                {"id": "b", "score": 0.8, "chunk_index": 0},
+            ],
+        )
+        monkeypatch.setattr(
+            retrieval, "graph_expand", lambda ids, **kwargs: [{"id": "c"}, {"id": "a"}]
+        )
+        monkeypatch.setattr(retrieval, "_annotate", lambda results: results)
+        return retrieval
+
+    def test_a_vector_hit_keeps_the_chunk_that_matched(self, stubbed):
+        results = {r["id"]: r for r in stubbed.hybrid_search("q")}
+        assert results["a"]["chunk_index"] == 3
+        assert results["b"]["chunk_index"] == 0
+
+    def test_a_graph_only_hit_claims_no_chunk(self, stubbed):
+        results = {r["id"]: r for r in stubbed.hybrid_search("q")}
+        assert "chunk_index" not in results["c"]

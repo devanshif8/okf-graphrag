@@ -1,0 +1,15 @@
+{"query": "my beer tastes like butter, what went wrong", "relevant": ["brewing/yeast-pitching.md"], "tag": "late-chunk"}
+{"query": "how do I get rid of a butterscotch off flavour before packaging", "relevant": ["brewing/yeast-pitching.md"], "tag": "late-chunk"}
+{"query": "should I raise the temperature at the end of fermentation", "relevant": ["brewing/yeast-pitching.md"], "tag": "late-chunk"}
+{"query": "how many yeast cells should I pitch into a batch", "relevant": ["brewing/yeast-pitching.md"], "tag": "early-chunk"}
+{"query": "how long do I need to boil hops to get bitterness", "relevant": ["brewing/hops.md"], "tag": "early-chunk"}
+{"query": "when should I add hops for aroma rather than bitterness", "relevant": ["brewing/hops.md"], "tag": "early-chunk"}
+{"query": "should there be more sulfate or more chloride in my water", "relevant": ["brewing/water-chemistry.md"], "tag": "early-chunk"}
+{"query": "how often do I need to feed my starter", "relevant": ["baking/sourdough-starter.md"], "tag": "early-chunk"}
+{"query": "how do I know when my starter is ready to bake with", "relevant": ["baking/sourdough-starter.md"], "tag": "early-chunk"}
+{"query": "why did my loaf come out dense and flat", "relevant": ["baking/gluten-development.md"], "tag": "early-chunk"}
+{"query": "can I develop dough without kneading it", "relevant": ["baking/gluten-development.md"], "tag": "early-chunk"}
+{"query": "which bacteria acidify fermented foods", "relevant": ["microbiology/lactobacillus.md"], "tag": "early-chunk"}
+{"query": "why is a cold slow proof tangier than a warm one", "relevant": ["microbiology/lactobacillus.md"], "tag": "early-chunk"}
+{"query": "what happens if I ferment something without adding any yeast", "relevant": ["microbiology/wild-yeast.md"], "tag": "early-chunk"}
+{"query": "what is brettanomyces and what does it taste like", "relevant": ["microbiology/wild-yeast.md"], "tag": "early-chunk"}

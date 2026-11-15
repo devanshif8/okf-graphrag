@@ -1,7 +1,24 @@
-# Runtime dependencies. Floors are the oldest releases the code is known to
-# work against; the versions this was developed and verified on are noted.
+# Runtime dependencies for the pipeline and the web UI. Floors are the oldest
+# releases the code is known to work against; the versions this was developed
+# and verified on are noted.
+#
+# The converter's format libraries are deliberately NOT here: convert_to_okf.py
+# imports them lazily, so ingest and search run without them, and the container
+# image (which only ever loads and searches) does not carry them. Install them
+# with `pip install pypdf python-docx beautifulsoup4`, or get them along with
+# everything else from requirements-dev.txt.
 pyyaml>=6.0          # verified on 6.0.3
 neo4j>=5.14          # verified on 6.2.0
 python-dotenv>=1.0   # verified on 1.2.2
 qdrant-client>=1.10  # collection_exists / query_points; verified on 1.19.0
 sentence-transformers>=3.0  # verified on 5.7.0
+numpy>=1.24          # linker.py vector maths; verified on 2.4.2
+
+# Web UI (webui.py). The stdlib's http.server documents itself as unsuitable
+# for production - no request timeouts, no size limits, no graceful shutdown -
+# so the UI runs as an ASGI app under uvicorn instead.
+fastapi>=0.110       # lifespan context-manager API
+uvicorn>=0.27
+
+# Answer generation (answer.py). Imported lazily, so search works without it.
+openai>=1.0          # verified on 1.109.1

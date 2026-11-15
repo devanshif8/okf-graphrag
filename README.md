@@ -3,7 +3,7 @@
 [![tests](https://github.com/devanshif8/okf-graphrag/actions/workflows/tests.yml/badge.svg)](https://github.com/devanshif8/okf-graphrag/actions/workflows/tests.yml)
 [![license](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-A consumer tool for [OKF (Open Knowledge Format)](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf) that ingests OKF bundles into a hybrid retrieval system — vector search (Qdrant) + graph traversal (Neo4j) — so agents can query OKF knowledge instead of just loading files flat into context.
+A consumer tool for [OKF (Open Knowledge Format)](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf) that ingests OKF bundles into a hybrid retrieval system — vector search (Qdrant) + graph traversal (Neo4j) — so agents can query OKF knowledge instead of just loading files flat into context. An optional LLM layer (`answer.py`, OpenAI) then writes a cited answer from the retrieved passages.
 
 ## Why
 
@@ -77,6 +77,12 @@ is independent.
   with no branching or state to manage, so a graph framework would add a
   dependency without buying anything. Worth revisiting if multi-step or
   iterative retrieval lands.
+- ✅ **LLM answers** — `answer.py` (and the **Ask** button in the web UI)
+  sends the top hybrid-search passages to an OpenAI model (`gpt-4o-mini` by
+  default) and gets back an answer grounded only in those passages, with every
+  claim cited as `[n]`. Unsupported citations are stripped, and when the
+  passages don't cover the question it says so instead of guessing. Needs
+  `OPENAI_API_KEY`; search works without it. See *Answering questions* below.
 - ✅ **Converter** — `convert_to_okf.py` turns `.pdf`, `.docx`, `.txt` and
   `.html` documents into OKF files that `parser.py` reads unchanged: extracted
   text as the body, provenance (`sources`, `generated`) as frontmatter. Format

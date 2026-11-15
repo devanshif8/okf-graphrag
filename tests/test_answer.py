@@ -33,6 +33,25 @@ class FakeClient:
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
+class FakeChecker:
+    """Stands in for the NLI cross-encoder: entails every pair it is shown."""
+
+    config = SimpleNamespace(id2label={0: "contradiction", 1: "entailment", 2: "neutral"})
+
+    def __init__(self):
+        self.pairs = []
+
+    def predict(self, pairs, apply_softmax=True):
+        self.pairs.extend(pairs)
+        return [[0.0, 1.0, 0.0] for _ in pairs]
+
+
+@pytest.fixture(autouse=True)
+def no_real_checker(monkeypatch):
+    """Never load the real NLI model here: it is ~280MB and tested on its own."""
+    monkeypatch.setattr(answer.grounding, "_model", lambda: FakeChecker())
+
+
 SOURCES = [
     {"n": 1, "id": "shelf/a.md", "title": "Yeast", "text": "Yeast makes gas."},
     {"n": 2, "id": "shelf/b.md", "title": "Ovens", "text": "Ovens are hot."},
@@ -147,6 +166,39 @@ class TestGenerate:
 
     def test_a_null_reply_is_treated_as_no_answer(self):
         assert generate("Why?", [result("a", "x")], client=FakeClient(None))["answered"] is False
+
+    def test_an_answer_is_checked_claim_by_claim_against_what_it_cites(self):
+        checker = FakeChecker()
+        out = generate(
+            "Why?",
+            [result("a", "Yeast makes gas."), result("b", "Ovens are hot.")],
+            client=FakeClient("Yeast makes gas [1]. Ovens are hot [2]."),
+            checker=checker,
+        )
+        assert out["grounding"]["supported"] == out["grounding"]["checked"] == 2
+        assert checker.pairs == [
+            ("Yeast makes gas.", "Yeast makes gas."),
+            ("Ovens are hot.", "Ovens are hot."),
+        ]
+
+    def test_a_declined_answer_has_no_support_check(self):
+        out = generate("Why?", [result("a", "x")], client=FakeClient(NO_ANSWER))
+        assert out["grounding"] is None
+
+    def test_reports_the_retrieval_score_with_or_without_an_answer(self):
+        hits = [{**result("a", "x"), "similarity": 0.61}]
+        assert generate("Why?", hits, client=FakeClient("X [1]."))["retrieval"] == {
+            "similarity": 0.61, "level": "high"}
+        assert generate("Why?", hits, client=FakeClient(NO_ANSWER))["retrieval"]["level"] == "high"
+
+    def test_a_checker_that_cannot_load_marks_the_answer_unchecked(self, monkeypatch):
+        def broken():
+            raise OSError("no network")
+
+        monkeypatch.setattr(answer.grounding, "_model", broken)
+        out = generate("Why?", [result("a", "x")], client=FakeClient("X [1]."))
+        assert out["answered"] is True
+        assert "unavailable" in out["grounding"]["error"]
 
 
 class TestAsk:

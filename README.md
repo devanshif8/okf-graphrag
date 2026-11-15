@@ -82,7 +82,11 @@ is independent.
   default) and gets back an answer grounded only in those passages, with every
   claim cited as `[n]`. Unsupported citations are stripped, and when the
   passages don't cover the question it says so instead of guessing. Needs
-  `OPENAI_API_KEY`; search works without it. See *Answering questions* below.
+  `OPENAI_API_KEY`; search works without it. Each answer then gets a
+  **support check**: a separate NLI model scores whether each sentence's cited
+  passage actually says it ("3 of 4 claims supported"), plus a **retrieval
+  match** score for how close the passages were to the question. See
+  *Answering questions* below.
 - ✅ **Converter** — `convert_to_okf.py` turns `.pdf`, `.docx`, `.txt` and
   `.html` documents into OKF files that `parser.py` reads unchanged: extracted
   text as the body, provenance (`sources`, `generated`) as frontmatter. Format
@@ -302,6 +306,51 @@ answer. This matters for a pre-1920 library: a question about jet lag still
 retrieves the nearest chapter on travel. Citations are checked afterwards.
 A `[n]` that names no passage is removed, and an answer that cites nothing is
 flagged. `--top-k` sets how many passages the model sees (default 6).
+
+#### How sure is the answer? Support check and retrieval score
+
+A citation shows that a claim *points* at a passage, not that the passage
+*says* it. So every answer is checked after it is written, by `grounding.py`,
+with a model that is **not** the one that wrote it: an NLI cross-encoder
+(`cross-encoder/nli-deberta-v3-xsmall`, ~280MB, downloaded on first use). It
+reads each sentence next to the passage it cites and scores how strongly the
+passage entails it. Example output from the CLI (the claim scores are from a
+real run of the checker; the retrieval line is illustrative):
+
+```
+Grounding: 3 of 4 claims supported by their cited passage (75%)
+  [ok] The yeast is a tiny living plant that multiplies in warm dough. (0.80)
+  [ok] It gives off a gas that makes the dough light and spongy. (0.98)
+  [ok] The book claims that yeast is a vegetable. (0.94)
+  [??] Yeast needs about two hours to work. (0.00)
+       The passages do not say how hot the oven should be.
+
+Retrieval match: high (best passage similarity 0.58)
+```
+
+- **supported / unsupported**: entailment probability ≥ 0.5 or not. A
+  sentence citing several passages scores as its best one, and is checked only
+  against what it cites: a true claim with the wrong citation fails.
+- **uncited**: a claim with no valid citation. It counts against the score.
+- **note**: a sentence *about* the passages ("the passages do not say…"). The
+  prompt asks for these, so they are listed but not counted.
+- "The book claims that…" is checked on what follows the attribution, since
+  the prompt asks for that wording when a source is outdated.
+- **Retrieval match** is the cosine similarity between the question and the
+  best passage, the same number vector search ranks on: high ≥ 0.5,
+  medium ≥ 0.35, low below. A low match means the books probably don't
+  cover the question well, even if every claim is supported. The bands are a
+  heuristic for MiniLM and have not yet been calibrated against
+  `eval/judged_queries.jsonl`.
+
+Why a separate checker rather than asking the LLM how sure it is: a model that
+invented a claim is usually just as confident about it. What this does **not**
+prove: NLI models miss paraphrases that rely on world knowledge, and a passage
+can entail a claim the book itself has wrong. It catches the common
+hallucination, a fluent sentence the sources never said, and nothing stronger
+is claimed for it. The web UI shows the same panel under each answer. If the
+checker can't load, the answer says "Not checked" rather than looking as if it
+passed.
 
 The generation step never changes ranking. `hybrid_search` runs with its
 defaults, so the retrieval numbers below still describe the system the

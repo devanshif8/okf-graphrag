@@ -380,12 +380,15 @@ def hybrid_search(
     )[:top_k]
 
     # Keep the chunk that put each vector hit in the list, so a caller can show
-    # the passage responsible. Graph-only results have no such chunk: the walk
-    # reached the whole concept, not a passage of it.
-    matched = {hit["id"]: hit["chunk_index"] for hit in hits}
+    # the passage responsible, and its cosine similarity to the query, which -
+    # unlike the RRF score - means the same thing from one query to the next.
+    # Graph-only results have neither: the walk reached the whole concept, not
+    # a passage of it.
+    matched = {hit["id"]: hit for hit in hits}
     for result in fused:
         if result["id"] in matched:
-            result["chunk_index"] = matched[result["id"]]
+            result["chunk_index"] = matched[result["id"]]["chunk_index"]
+            result["similarity"] = matched[result["id"]]["score"]
     return _annotate(fused)
 
 

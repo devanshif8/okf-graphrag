@@ -228,3 +228,13 @@ class TestHybridSearchPassages:
     def test_a_graph_only_hit_claims_no_chunk(self, stubbed):
         results = {r["id"]: r for r in stubbed.hybrid_search("q")}
         assert "chunk_index" not in results["c"]
+
+    def test_a_vector_hit_carries_its_similarity_and_a_graph_only_hit_none(self, stubbed):
+        results = {r["id"]: r for r in stubbed.hybrid_search("q")}
+        assert results["a"]["similarity"] == 0.9
+        assert results["b"]["similarity"] == 0.8
+        assert "similarity" not in results["c"]
+
+    def test_similarity_does_not_change_the_fused_order(self, stubbed):
+        # a is in both lists, so it leads; the similarity is carried, not used.
+        assert [r["id"] for r in stubbed.hybrid_search("q")][0] == "a"

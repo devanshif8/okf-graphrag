@@ -147,6 +147,15 @@
     color: var(--accent); margin-right: 6px;
   }
   #answer .sources .path { display: inline; margin-left: 6px; }
+  #answer .trust { margin: 14px 0 0; padding: 12px 0 0; border-top: 1px solid var(--line); font-size: 13px; }
+  #answer .trust .head { font-weight: 600; }
+  #answer .trust .meta { color: var(--faint); font-weight: 400; margin-left: 6px; }
+  #answer .trust .claim { display: flex; gap: 8px; margin-top: 6px; line-height: 1.45; }
+  #answer .trust .mark { flex: none; width: 1.2em; text-align: center; }
+  #answer .trust .supported .mark { color: #3c8a5a; }
+  #answer .trust .unsupported .mark, #answer .trust .uncited .mark { color: #c05a4a; }
+  #answer .trust .note { color: var(--faint); }
+  #answer .trust .score { flex: none; margin-left: auto; color: var(--faint); font-variant-numeric: tabular-nums; }
 
   ol { list-style: none; margin: 26px 0 0; padding: 0; }
   li {
@@ -360,6 +369,8 @@ async function ask() {
         ? "The library doesn't answer that. The closest passages were on related topics, but none of them said it."
         : "Nothing was retrieved to answer from. Is a bundle loaded?"),
     );
+    const match = retrievalLine(payload.retrieval);
+    if (match) box.append(match);
     return;
   }
 
@@ -382,7 +393,64 @@ async function ask() {
     }
     parts.push(sources);
   }
+  const trust = trustPanel(payload);
+  if (trust) parts.push(trust);
   box.replaceChildren(...parts);
+}
+
+// How far to trust the answer: how close the passages were to the question,
+// and whether each sentence is backed by the passage it cites. Both come from
+// grounding.py; the support check is a separate model from the writer.
+const MARKS = { supported: "✓", unsupported: "✗", uncited: "✗", note: "·" };
+const WHY = {
+  supported: "its cited passage says this",
+  unsupported: "its cited passage does not clearly say this",
+  uncited: "cites no passage",
+  note: "a remark about the passages, not counted",
+};
+
+function retrievalLine(match) {
+  if (!match || match.similarity == null) return null;
+  const line = el("div", "trust");
+  line.append(
+    el("span", "head", "Retrieval match: " + match.level),
+    el("span", "meta", "best passage similarity " + match.similarity.toFixed(2)),
+  );
+  return line;
+}
+
+function trustPanel(payload) {
+  const check = payload.grounding;
+  const match = payload.retrieval;
+  if (!check && !(match && match.similarity != null)) return null;
+  const panel = el("div", "trust");
+
+  if (check && check.error) {
+    panel.append(el("div", "head", "Not checked"), el("div", "note", check.error));
+  } else if (check && check.checked) {
+    const head = el("div", "head",
+      "Grounding: " + check.supported + " of " + check.checked + " claims supported");
+    head.append(el("span", "meta", Math.round(check.score * 100) + "%"));
+    panel.append(head);
+    for (const c of check.claims) {
+      const row = el("div", "claim " + c.status);
+      row.title = WHY[c.status];
+      row.append(el("span", "mark", MARKS[c.status]), el("span", null, c.text));
+      if (c.support != null) row.append(el("span", "score", c.support.toFixed(2)));
+      panel.append(row);
+    }
+  }
+
+  if (match && match.similarity != null) {
+    const line = el("div", "head");
+    line.style.marginTop = panel.childNodes.length ? "10px" : "0";
+    line.append(
+      document.createTextNode("Retrieval match: " + match.level),
+      el("span", "meta", "best passage similarity " + match.similarity.toFixed(2)),
+    );
+    panel.append(line);
+  }
+  return panel;
 }
 
 function el(tag, className, text) {

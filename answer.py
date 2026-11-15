@@ -10,6 +10,9 @@ answer. The probe needs in eval/needs.csv are exactly those questions.
 
 Citations are checked after the fact rather than trusted: a number that names
 no passage is dropped, and the returned sources are the ones actually cited.
+Then `grounding` checks that each cited passage actually *says* what the
+sentence citing it claims, with a separate NLI model, and scores how closely
+the passages matched the question - see grounding.py.
 
 This module never feeds back into ranking. `hybrid_search` is called with its
 defaults, so the retrieval evaluation in eval/ measures the same system this
@@ -23,6 +26,7 @@ import re
 from neo4j.exceptions import AuthError, ConfigurationError, ServiceUnavailable
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
+import grounding
 import retrieval
 from neo4j_loader import NEO4J_PASSWORD, NEO4J_URI, NEO4J_USER
 from passages import with_passage
@@ -141,17 +145,34 @@ def parse_reply(reply: str, sources: list[dict]) -> dict:
     }
 
 
-def generate(question: str, results: list[dict], client=None) -> dict:
+def _grounding(answer: str, sources: list[dict], checker=None) -> dict:
+    """Run the support check, reporting a checker that can't load as an error.
+
+    The answer is still worth returning without its check - but it must say it
+    went unchecked, not look like an answer that passed.
+    """
+    try:
+        return grounding.check_claims(answer, sources, model=checker)
+    except OSError as exc:  # the NLI weights could not be downloaded or read
+        return {"error": f"support check unavailable: {exc}"}
+
+
+def generate(question: str, results: list[dict], client=None, checker=None) -> dict:
     """Answer `question` from already-retrieved results that carry passages.
 
     Separate from `ask` so the generation step can be tested, or reused by a
-    caller that has its own results, without either store running.
+    caller that has its own results, without either store running. The reply
+    carries `retrieval` (how close the passages were to the question) and,
+    for an answer, `grounding` (how many of its claims the cited passages
+    support); `checker` replaces the NLI model, for tests.
     """
     sources = build_sources(results)
+    match = grounding.retrieval_score(results)
     if not sources:
         # Nothing to quote: don't spend a call asking the model to say so.
         return {"question": question, "answered": False, "answer": None,
-                "cited": [], "uncited": False, "sources": []}
+                "cited": [], "uncited": False, "sources": [],
+                "retrieval": match, "grounding": None}
 
     response = (client or _client()).chat.completions.create(
         model=OPENAI_MODEL,
@@ -166,13 +187,40 @@ def generate(question: str, results: list[dict], client=None) -> dict:
         "question": question,
         **parsed,
         "sources": [{k: s[k] for k in ("n", "id", "title")} for s in sources],
+        "retrieval": match,
+        "grounding": _grounding(parsed["answer"], sources, checker) if parsed["answered"] else None,
     }
 
 
-def ask(question: str, top_k: int = TOP_K, client=None) -> dict:
+def ask(question: str, top_k: int = TOP_K, client=None, checker=None) -> dict:
     """Retrieve passages for `question` with hybrid search and answer from them."""
     results = retrieval.hybrid_search(question, top_k=top_k)
-    return generate(question, [with_passage(r, question) for r in results], client=client)
+    return generate(
+        question, [with_passage(r, question) for r in results], client=client, checker=checker
+    )
+
+
+_MARK = {"supported": "ok", "unsupported": "??", "uncited": "--", "note": "  "}
+
+
+def _print_checks(result: dict) -> None:
+    """Print the retrieval score and the per-claim support check."""
+    match = result.get("retrieval") or {}
+    if match.get("similarity") is not None:
+        print(f"\nRetrieval match: {match['level']} "
+              f"(best passage similarity {match['similarity']:.2f})")
+    check = result.get("grounding")
+    if not check:
+        return
+    if "error" in check:
+        print(f"\n({check['error']})")
+        return
+    if check["checked"]:
+        print(f"Grounding: {check['supported']} of {check['checked']} claims supported "
+              f"by their cited passage ({check['score']:.0%})")
+    for claim in check["claims"]:
+        support = "" if claim["support"] is None else f" ({claim['support']:.2f})"
+        print(f"  [{_MARK[claim['status']]}] {claim['text']}{support}")
 
 
 def main() -> None:
@@ -226,6 +274,7 @@ def main() -> None:
             print("\nClosest passages, none of which answered it:")
             for s in result["sources"]:
                 print(f"  [{s['n']}] {s['title']}  ({s['id']})")
+        _print_checks(result)
         return
 
     print(result["answer"])
@@ -234,6 +283,7 @@ def main() -> None:
     print("\nSources:")
     for s in result["cited"]:
         print(f"  [{s['n']}] {s['title']}  ({s['id']})")
+    _print_checks(result)
 
 
 if __name__ == "__main__":

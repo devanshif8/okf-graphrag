@@ -37,6 +37,17 @@ snapshot_download( \
     ignore_patterns=['*.onnx', '*openvino*', '*.h5', '*tf_model*', '*rust_model*', '*.msgpack', '*.ot', '*.bin'], \
 )"
 
+# The NLI checker behind answer.py's support check (grounding.NLI_MODEL). The
+# runtime is offline, so without this the check would report itself
+# unavailable on every answer. ~280MB; search alone never loads it.
+ARG NLI_MODEL=cross-encoder/nli-deberta-v3-xsmall
+RUN python -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download( \
+    repo_id='${NLI_MODEL}', \
+    ignore_patterns=['*.onnx', '*openvino*', '*.h5', '*tf_model*', '*rust_model*', '*.msgpack', '*.ot', '*.bin'], \
+)"
+
 
 FROM python:3.12-slim AS runtime
 
